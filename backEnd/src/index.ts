@@ -12,37 +12,37 @@ dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 5000;
-const MONGO_URI  = process.env.MONGO_URI;
+const MONGO_URI = process.env.MONGO_URI;
+// Apne frontend ka URL yahan se utha rahe hain
+const FRONTEND_URL = process.env.FRONTEND_URL || "https://expense-splitter-frontend-mqg9.onrender.com";
 
 const httpServer = createServer(app);
+
+// CORS Config for both Express and Socket.io
+const corsOptions = {
+    origin: FRONTEND_URL,
+    credentials: true,
+    methods: ["GET", "POST", "PUT", "DELETE"]
+};
+
 const io = new Server(httpServer, {
-    cors: {
-        origin: "http://localhost:5173", 
-        methods: ["GET", "POST", "PUT", "DELETE"]
-    }
+    cors: corsOptions
 });
+
+app.use(cors(corsOptions));
+app.use(express.json());
 
 app.set('io', io);
 
 io.on('connection', (socket) => {
     console.log(`⚡ Socket connected: ${socket.id}`);
-
-    // For Group Pages
+    
     socket.on('join_group', (groupId) => {
-        const id = String(groupId).trim();
-        socket.join(id);
-        console.log(`📦 Socket ${socket.id} joined Group Room: ${id}`);
+        socket.join(String(groupId).trim());
     });
 
-    socket.on('leave_group', (groupId) => {
-        socket.leave(String(groupId).trim());
-    });
-
-    // 🔥 FIXED: For Global Dashboard Sync (Personal User Room)
     socket.on('join_user_room', (userId) => {
-        const id = String(userId).trim();
-        socket.join(id);
-        console.log(`👤 Socket ${socket.id} joined User Room: ${id}`);
+        socket.join(String(userId).trim());
     });
 
     socket.on('disconnect', () => {
@@ -50,11 +50,8 @@ io.on('connection', (socket) => {
     });
 });
 
-app.use(cors());
-app.use(express.json());
-
 if(!MONGO_URI){
-    console.error("Error: MongoURI is missing, connection failed");
+    console.error("Error: MongoURI is missing");
     process.exit(1);
 }
 
@@ -66,10 +63,9 @@ app.use('/api/auth', authRoutes);
 app.use('/api/expenses', expensesRoutes);
 app.use('/api/groups', groupRoutes);
 
-app.get('/', (req: Request, res: Response) => {
-    res.send('Home page of Expense splitter app');
-});
+app.get('/', (req, res) => { res.send('API is running'); });
 
+// IMPORTANT: httpServer.listen use karna hai, app.listen nahi!
 httpServer.listen(PORT, () => {
-    console.log(`Server is running on http://localhost:${PORT}`);
+    console.log(`Server running on port ${PORT}`);
 });
