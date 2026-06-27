@@ -10,6 +10,7 @@
     "strict": true,
     "forceConsistentCasingInFileNames": true,
     "module": "ESNext",
+    "allowImportingTsExtensions": true,
     "moduleResolution": "bundler", 
     "resolveJsonModule": true,
     "isolatedModules": true,
