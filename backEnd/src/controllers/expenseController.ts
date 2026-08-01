@@ -3,6 +3,7 @@ import Expense from "../models/Expense";
 import { AuthRequest } from "../middleware/authMiddleware";
 import Group from "../models/Group";
 import { minimizeCashFlow } from '../utils/minimizeTransactions';
+import { toPaise, toRupees } from '../utils/money';
 import { GoogleGenAI } from "@google/genai";
 import axios from 'axios';
 import FormData from 'form-data';
@@ -15,12 +16,46 @@ const getRawId = (id: any): string => {
 export const addExpense = async (req: AuthRequest, res: Response): Promise<void> => {
     try {
         const { title, totalAmount, groupId, payers, splits, splitType } = req.body;
-        
-        let processedSplits = splits;
-        if (splitType === 'EQUAL') {
-            const share = totalAmount / splits.length;
-            processedSplits = splits.map((s: any) => ({ ...s, amountOwed: share }));
+
+        // ---- The ledger only works if every expense is zero-sum, so enforce it here ----
+        const totalPaise = toPaise(totalAmount);
+        if (!Number.isFinite(totalPaise) || totalPaise <= 0) {
+            res.status(400).json({ message: "Total amount must be a positive number" });
+            return;
         }
+        if (!Array.isArray(payers) || payers.length === 0 || !Array.isArray(splits) || splits.length === 0) {
+            res.status(400).json({ message: "At least one payer and one split are required" });
+            return;
+        }
+
+        const payersPaise = payers.reduce((sum: number, p: any) => sum + toPaise(p.amount), 0);
+        if (payersPaise !== totalPaise) {
+            res.status(400).json({ message: "Payer amounts must add up to the total amount" });
+            return;
+        }
+
+        // ---- Build the splits in integer paise so they always sum to the total ----
+        let splitsPaise: number[];
+        if (splitType === 'EQUAL') {
+            // ₹100 across 3 people becomes 3334 + 3333 + 3333 paise, never 33.33 x 3 = 99.99
+            const base = Math.floor(totalPaise / splits.length);
+            const remainder = totalPaise - base * splits.length;
+            splitsPaise = splits.map((_: any, i: number) => base + (i < remainder ? 1 : 0));
+        } else {
+            splitsPaise = splits.map((s: any) => toPaise(s.amountOwed));
+            const drift = totalPaise - splitsPaise.reduce((a, b) => a + b, 0);
+            // A percentage split can land a few paise off; absorb that, reject anything bigger
+            if (!Number.isFinite(drift) || Math.abs(drift) > splits.length) {
+                res.status(400).json({ message: "Split amounts must add up to the total amount" });
+                return;
+            }
+            splitsPaise[0] += drift;
+        }
+
+        const processedSplits = splits.map((s: any, i: number) => ({
+            user: s.user,
+            amountOwed: toRupees(splitsPaise[i])
+        }));
 
         const newExpense = new Expense({
             title, totalAmount, groupId, payers, 
@@ -177,14 +212,33 @@ export const getUsersDashboard = async (req: AuthRequest, res: Response): Promis
 export const settleUp = async (req: AuthRequest, res: Response): Promise<void> => {
     try {
         const { payerId, receiverId, amount, groupId } = req.body;
+
+        // You can only claim a payment you made yourself - otherwise anyone could
+        // fabricate settlements between two other people.
+        if (String(payerId) !== req.user.id) {
+            res.status(403).json({ message: "You can only record a settlement that you paid" });
+            return;
+        }
+        if (!receiverId || String(receiverId) === String(payerId)) {
+            res.status(400).json({ message: "Invalid settlement receiver" });
+            return;
+        }
+
+        const amountPaise = toPaise(amount);
+        if (!Number.isFinite(amountPaise) || amountPaise <= 0) {
+            res.status(400).json({ message: "Settlement amount must be a positive number" });
+            return;
+        }
+        const settledAmount = toRupees(amountPaise);
+
         const settlement = await Expense.create({
             title: "Settlement Request",
-            totalAmount: amount,
+            totalAmount: settledAmount,
             category: 'SETTLEMENT',
             splitType: 'EXACT',
             groupId: groupId || null,
-            payers: [{ user: payerId, amount }],       
-            splits: [{ user: receiverId, amountOwed: amount }], 
+            payers: [{ user: payerId, amount: settledAmount }],
+            splits: [{ user: receiverId, amountOwed: settledAmount }],
             createdBy: req.user.id,
             settlementStatus: 'PENDING'
         });
@@ -214,21 +268,27 @@ export const settleUp = async (req: AuthRequest, res: Response): Promise<void> =
 export const approveSettlement = async (req: AuthRequest, res: Response): Promise<void> => {
     try {
         const { settlementId } = req.params;
-        const settlement = await Expense.findById(settlementId);
 
-        if (!settlement || settlement.category !== 'SETTLEMENT') {
-            res.status(404).json({ message: "Settlement request not found" }); return;
+        // One atomic compare-and-swap: find it, check it is still PENDING and that
+        // the caller is the receiver, and flip it - all in a single DB round trip.
+        // A read-then-save would let two concurrent approvals both succeed.
+        const settlement = await Expense.findOneAndUpdate(
+            {
+                _id: settlementId,
+                category: 'SETTLEMENT',
+                settlementStatus: 'PENDING',
+                'splits.0.user': req.user.id
+            },
+            { $set: { settlementStatus: 'SETTLED', title: "Settlement Completed" } },
+            { new: true }
+        );
+
+        if (!settlement) {
+            res.status(409).json({ message: "Settlement not found, already processed, or not yours to approve" });
+            return;
         }
 
         const receiverId = getRawId(settlement.splits[0].user);
-        if (receiverId !== req.user.id) {
-            res.status(403).json({ message: "Only the receiver can approve" }); return;
-        }
-
-        settlement.settlementStatus = 'SETTLED';
-        settlement.title = "Settlement Completed";
-        await settlement.save();
-
         const io = req.app.get('io');
         if (io) {
             if (settlement.groupId) io.to(getRawId(settlement.groupId)).emit('group_data_changed');
@@ -245,21 +305,25 @@ export const approveSettlement = async (req: AuthRequest, res: Response): Promis
 export const rejectSettlement = async (req: AuthRequest, res: Response): Promise<void> => {
     try {
         const { settlementId } = req.params;
-        const settlement = await Expense.findById(settlementId);
 
-        if (!settlement || settlement.category !== 'SETTLEMENT') {
-            res.status(404).json({ message: "Settlement request not found" }); return;
+        // Same atomic compare-and-swap as approve
+        const settlement = await Expense.findOneAndUpdate(
+            {
+                _id: settlementId,
+                category: 'SETTLEMENT',
+                settlementStatus: 'PENDING',
+                'splits.0.user': req.user.id
+            },
+            { $set: { settlementStatus: 'REJECTED', title: "Settlement Rejected" } },
+            { new: true }
+        );
+
+        if (!settlement) {
+            res.status(409).json({ message: "Settlement not found, already processed, or not yours to reject" });
+            return;
         }
 
         const receiverId = getRawId(settlement.splits[0].user);
-        if (receiverId !== req.user.id) {
-            res.status(403).json({ message: "Only the receiver can reject" }); return;
-        }
-
-        settlement.settlementStatus = 'REJECTED';
-        settlement.title = "Settlement Rejected";
-        await settlement.save();
-
         const io = req.app.get('io');
         if (io) {
             if (settlement.groupId) io.to(getRawId(settlement.groupId)).emit('group_data_changed');

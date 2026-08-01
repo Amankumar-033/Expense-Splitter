@@ -32,9 +32,10 @@ export const minimizeCashFlow = (netBalances: Map<string, number>): Transaction[
         const debtor = debtors[i];
         const creditor = creditors[j];
 
-        // Find the minimum of the two balances
-        const minAmount = Math.min(debtor.amount, creditor.amount);
-        const settledAmount = Math.round(minAmount * 100) / 100;
+        // Find the minimum of the two balances, rounded to the nearest paisa.
+        // We must settle and deduct the SAME value, otherwise the recorded
+        // transactions slowly drift away from the actual balances.
+        const settledAmount = Math.round(Math.min(debtor.amount, creditor.amount) * 100) / 100;
 
         if (settledAmount > 0) {
             transactions.push({
@@ -45,8 +46,8 @@ export const minimizeCashFlow = (netBalances: Map<string, number>): Transaction[
         }
 
         // Adjust the balances
-        debtor.amount -= minAmount;
-        creditor.amount -= minAmount;
+        debtor.amount -= settledAmount;
+        creditor.amount -= settledAmount;
 
         // If a balance drops below 1 paisa (0.01), move to the next person
         if (debtor.amount < 0.01) i++;

@@ -4,6 +4,7 @@ import { LogOut, PlusCircle, Users, TrendingUp, TrendingDown, Wallet, Loader2, C
 import { useNavigate } from 'react-router-dom';
 import api from '../api/axios';
 import { io } from 'socket.io-client';
+import { SOCKET_URL } from '../api/socket';
 
 interface Group {
     _id: string;
@@ -71,7 +72,7 @@ export default function Dashboard() {
     useEffect(() => {
         fetchDashboardData();
 
-        socketRef.current = io('http://localhost:5000'); 
+        socketRef.current = io(SOCKET_URL);
 
         const userId = user?._id || (user as any)?.id;
         if (userId) {

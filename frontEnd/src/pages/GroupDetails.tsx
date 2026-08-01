@@ -4,6 +4,7 @@ import { ArrowLeft, Users, Loader2, Receipt, Trash2 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import api from '../api/axios';
 import { io } from 'socket.io-client';
+import { SOCKET_URL } from '../api/socket';
 
 // Humare naye chhote-chhote components!
 import SettleUpSection from '../components/SettleUpSection';
@@ -66,7 +67,7 @@ export default function GroupDetails() {
     useEffect(() => { 
         fetchGroupData(); 
         
-        socketRef.current = io('http://localhost:5000');
+        socketRef.current = io(SOCKET_URL);
         if (groupId) {
             socketRef.current.emit('join_group', groupId);
             socketRef.current.on('group_data_changed', () => fetchGroupData(true));

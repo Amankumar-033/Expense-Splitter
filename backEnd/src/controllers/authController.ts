@@ -24,7 +24,6 @@ export const sendOTP = async (req: Request, res: Response) : Promise<void> => {
         }
 
         const otp = Math.floor(100000 + Math.random()*900000).toString();
-        console.log("🚨 DEV MODE - OTP IS: ", otp);
 
         await OTP.findOneAndUpdate(
             {email},
